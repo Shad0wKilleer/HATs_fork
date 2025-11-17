@@ -54,7 +54,7 @@ class MOTSDataSet(data.Dataset):
                 # Replaces CoarseDropout
                 v2.RandomErasing(p=0.5, scale=(0.0, 0.05), ratio=(0.3, 3.3)),
                 # Replaces GaussianBlur
-                v2.GaussianBlur(kernel_size=3, sigma=(0.0, 1.0)),
+                v2.GaussianBlur(kernel_size=3, sigma=(0.01, 1.0)),
                 # Replaces AdditiveGaussianNoise
                 v2.Lambda(
                     lambda x: x + torch.randn_like(x) * (0.1 * torch.rand(1)).item()

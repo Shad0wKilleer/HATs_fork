@@ -162,7 +162,7 @@ def main():
     model.cuda()
 
     # --- Initialize PyTorch AMP GradScaler ---
-    scaler = GradScaler()
+    scaler = GradScaler(device="cuda")
 
     model = nn.DataParallel(model)
 
