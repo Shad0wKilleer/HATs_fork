@@ -293,25 +293,25 @@ def main():
                 )
 
                 # --- Anatomy Loss (Semi-supervised) ---
-                term_seg_Dice_semi, term_seg_BCE_semi, term_all_semi = HATs_learning(
-                    images,
-                    labels,
-                    args.batch_size,
-                    scales,
-                    model,
-                    now_task,
-                    labels_weight,
-                    loss_seg_DICE,
-                    loss_seg_CE,
-                    term_seg_Dice,
-                    term_seg_BCE,
-                    term_all,
-                    HATs_matrix,
-                    args.semi_ratio,
-                    Area_ratio,
-                )
+                # term_seg_Dice_semi, term_seg_BCE_semi, term_all_semi = HATs_learning(
+                # images,
+                # labels,
+                # args.batch_size,
+                # scales,
+                # model,
+                # now_task,
+                # labels_weight,
+                # loss_seg_DICE,
+                # loss_seg_CE,
+                # term_seg_Dice,
+                # term_seg_BCE,
+                # term_all,
+                # HATs_matrix,
+                # args.semi_ratio,
+                # Area_ratio,
+                # )
 
-                term_all = term_all_semi  # Use the combined loss
+                # term_all = term_all_semi  # Use the combined loss
 
             # --- AMP: Scale loss and perform backward pass ---
             scaler.scale(term_all).backward()
