@@ -111,11 +111,7 @@ def create_data_csv(root):
 
 
 if __name__ == "__main__":
-    # --- IMPORTANT ---
-    # Change this path to the root of your 'train' directory
-    # For example: '/content/drive/My Drive/Renal Segmentation/HATs_data/train'
-    trainset_dir = "/Data4/HATs/data/train"
-    # ---
+    trainset_dir = "/content/drive/My Drive/Renal Segmentation/HATs_data/train"
 
     print(f"Starting script. Scanning directory: {trainset_dir}")
     create_data_csv(root=trainset_dir)
