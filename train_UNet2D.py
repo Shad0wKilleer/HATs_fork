@@ -273,7 +273,7 @@ def main():
         train_PPV = np.zeros(args.task_num)
 
         for i_iter, batch in enumerate(trainloader):
-            images, labels, labels_weight, name, now_task, scales = batch
+            images, labels, labels_weight, name, layer_id, now_task, scales = batch
             images = images.cuda()
             labels = labels.cuda()
             labels_weight = labels_weight.cuda()
@@ -349,7 +349,7 @@ def main():
 
             print("Validating...")
             for i_iter, batch in enumerate(valloader):
-                images, labels, name, now_task, scales = batch
+                images, labels, weight, name, layer_id, now_task, scales = batch
                 images = images.cuda()
                 labels = labels.cuda()
                 now_task = now_task.cuda()
