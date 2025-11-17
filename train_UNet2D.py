@@ -100,6 +100,7 @@ def HATs_learning(
 
 
 def main():
+    print("Lets start babe...")
     # --- Command-Line Arguments ---
     parser = argparse.ArgumentParser()
     parser.add_argument(
