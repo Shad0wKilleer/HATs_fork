@@ -28,7 +28,6 @@ from sklearn.metrics import f1_score, confusion_matrix
 from torch.utils.data import DataLoader
 
 start = timeit.default_timer()
-import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
