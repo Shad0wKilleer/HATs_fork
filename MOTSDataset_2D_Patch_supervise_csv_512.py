@@ -85,8 +85,11 @@ class MOTSDataSet(data.Dataset):
         label = Image.open(datafiles["label_path"]).convert("RGB")  # Load as RGB
 
         # Convert to Tensors first (range [0, 1])
-        image = v2.functional.to_tensor(image)
-        label = v2.functional.to_tensor(label)
+        image = v2.functional.to_image(image)
+        image = v2.functional.to_dtype(image, dtype=torch.float32, scale=True)
+
+        label = v2.functional.to_image(label)
+        label = v2.functional.to_dtype(label, dtype=torch.float32, scale=True)
 
         # Take only the first channel of the label and add a channel dim
         # Original logic was label = label[0,:,:,0]
