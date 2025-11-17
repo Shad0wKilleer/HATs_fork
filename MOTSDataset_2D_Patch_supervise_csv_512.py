@@ -63,7 +63,7 @@ class MOTSDataSet(data.Dataset):
         )
 
         # This is the 512x512 random crop transform
-        self.crop512 = v2.RandomCrop(512)
+        self.crop512 = v2.RandomCrop(256)
 
         # --- End of transform definitions ---
 
@@ -100,30 +100,15 @@ class MOTSDataSet(data.Dataset):
         label = TVMask(label)
 
         # --- Handle Image Sizing ---
-        if image.shape[1] == 1024:
-            cnt = 0
-            image_i, label_i = self.crop512(image, label)
-
-            # Original logic to avoid empty crops
-            while label_i.sum() > 0.8 * 512 * 512 and cnt <= 50:
-                image_i, label_i = self.crop512(image, label)
-                cnt += 1
-            image, label = image_i, label_i
+        # --- Handle Image Sizing (Low Quality Test) ---
+        # We will crop everything to 256x256 to save memory
+        if image.shape[1] == 1024 or image.shape[1] == 512:
+            # Crop 1024 or 512 down to 256
+            image, label = self.crop256(image, label)
 
         elif image.shape[1] == 256:
-            # Re-implement random padding (PadToFixedSize with position='uniform')
-            pad_h = 512 - image.shape[1]
-            pad_w = 512 - image.shape[2]
-
-            # Get random padding amounts
-            top = torch.randint(0, pad_h + 1, (1,)).item()
-            left = torch.randint(0, pad_w + 1, (1,)).item()
-
-            # Calculate padding [left, top, right, bottom]
-            padding = [left, top, pad_w - left, pad_h - top]
-
-            image = v2.functional.pad(image, padding, fill=0)
-            label = v2.functional.pad(label, padding, fill=0)
+            # Image is already 256, do nothing
+            pass
 
         # --- Apply Augmentations ---
         if torch.rand(1) > 0.5:
@@ -211,21 +196,16 @@ class MOTSValDataSet(data.Dataset):
         # Take only the first channel of the label
         label = label[0, :, :].unsqueeze(0)
 
-        # --- Handle Image Sizing (Center Pad to 1024) ---
-        if image.shape[1] == 256 or image.shape[1] == 512:
-            pad_h = 1024 - image.shape[1]
-            pad_w = 1024 - image.shape[2]
+        # --- Handle Image Sizing (Low Quality Test) ---
+        # We will center-crop to 256x256
 
-            # Calculate centered padding
-            top = pad_h // 2
-            bottom = pad_h - top
-            left = pad_w // 2
-            right = pad_w - left
+        if image.shape[1] > 256:
+            image = v2.functional.center_crop(image, [256, 256])
+            label = v2.functional.center_crop(label, [256, 256])
 
-            padding = [left, top, right, bottom]
-
-            image = v2.functional.pad(image, padding, fill=0)
-            label = v2.functional.pad(label, padding, fill=0)
+        elif image.shape[1] == 256:
+            # Image is already 256, do nothing
+            pass
 
         # Binarize label
         label = (label >= 0.5).to(torch.float32)
