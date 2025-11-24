@@ -2,14 +2,13 @@ import os
 import glob
 import argparse
 import torch
-import torch.nn.functional as F
+import shutil
+import numpy as np
 from torchvision import transforms
 from PIL import Image
-import numpy as np
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-# Import the model definition from your provided file
+# Import the architecture (Essential for loading weights)
 try:
     from unet2D_Dodnet_scale_token import unet2D
 except ImportError:
@@ -20,187 +19,193 @@ except ImportError:
 
 
 def get_args():
-    parser = argparse.ArgumentParser(
-        description="Test PrPSeg 8-class Model on Custom Dataset"
+    parser = argparse.ArgumentParser(description="Test PrPSeg & Sort by Dice Score")
+
+    # Path Arguments
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        required=True,
+        help="Root folder containing data subfolders",
     )
     parser.add_argument(
-        "--data_root",
-        type=str,
-        default=".",
-        help="Root directory containing data folders",
+        "--weights_path", type=str, required=True, help="Path to .pth model weights"
     )
     parser.add_argument(
-        "--weights",
-        type=str,
-        default="model_weights/Omni-Seg_cls_sls_token_PrPSeg_8class.pth",
-        help="Path to pretrained weights",
+        "--output_folder", type=str, required=True, help="Path to save sorted results"
     )
+
+    # Settings
+    parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument(
-        "--output_dir",
+        "--mask_suffix",
         type=str,
-        default="inference_results",
-        help="Directory to save results",
+        default="_mask",
+        help="Suffix for ground truth files (e.g. '_mask' for image_01_mask.png)",
     )
-    parser.add_argument("--gpu", type=int, default=0, help="GPU ID to use")
+
     return parser.parse_args()
 
 
 def get_class_info(folder_name):
-    """
-    Maps folder names to Task ID (Class) and Scale ID based on PrPSeg 8-class specifications.
-    Returns: (task_id, scale_id, class_name) or (None, None, None) if skipped.
-    """
-    lower_name = folder_name.lower()
+    """Maps folder names to PrPSeg 8-class ID and Scale."""
+    lower = folder_name.lower()
 
-    # Exclusion list (Classes not in the 8-class model)
-    if "vessels" in lower_name or "ptc" in lower_name:
-        return None, None, None
+    # Exclude irrelevant folders
+    if "vessels" in lower or "ptc" in lower:
+        return None, None
 
-    # Mapping logic
-    # Scale 0: 5x, Scale 1: 10x, Scale 2: 20x, Scale 3: 40x
+    # Mapping
+    if "dt" in lower:
+        return 2, 1  # Distal Tubule
+    elif "pt" in lower:
+        return 3, 1  # Proximal Tubule
+    elif "capsule" in lower:
+        return 4, 0  # Capsule
+    elif "tuft" in lower:
+        return 5, 0  # Tuft
+    elif "medulla" in lower:
+        return 0, 0
+    elif "cortex" in lower:
+        return 1, 0
+    elif "pod" in lower:
+        return 6, 2
+    elif "mes" in lower:
+        return 7, 2
 
-    # 1. Functional Units
-    if "dt" in lower_name:  # Distal Tubule
-        return 2, 1, "DT"
-    elif "pt" in lower_name:  # Proximal Tubule
-        return 3, 1, "PT"
-    elif "capsule" in lower_name or "cap" in lower_name:  # Glomerular Capsule
-        return 4, 0, "Capsule"
-    elif "tuft" in lower_name:  # Glomerular Tuft
-        return 5, 0, "Tuft"
+    return None, None
 
-    # 2. Regions (Less likely to be in patch folders, but included for completeness)
-    elif "medulla" in lower_name:
-        return 0, 0, "Medulla"
-    elif "cortex" in lower_name:
-        return 1, 0, "Cortex"
 
-    # 3. Cells
-    elif "pod" in lower_name:
-        return 6, 2, "Podocyte"
-    elif "mes" in lower_name:
-        return 7, 2, "Mesangial"
+def calculate_dice(pred, gt):
+    """Calculates binary Dice score (0.0 to 1.0)."""
+    # Flatten
+    pred = pred.flatten()
+    gt = gt.flatten()
 
-    return None, None, None
+    # Ensure binary
+    pred = (pred > 0).astype(np.float32)
+    gt = (gt > 0).astype(np.float32)
+
+    intersection = np.sum(pred * gt)
+    union = np.sum(pred) + np.sum(gt)
+
+    if union == 0:
+        return 1.0 if intersection == 0 else 0.0
+
+    return (2.0 * intersection) / union
+
+
+def get_score_folder(dice_score):
+    """Returns folder name based on Dice score percentage."""
+    score_pct = dice_score * 100
+
+    if score_pct <= 10:
+        return "Score_00-10"
+    elif score_pct <= 20:
+        return "Score_11-20"
+    elif score_pct <= 30:
+        return "Score_21-30"
+    elif score_pct <= 40:
+        return "Score_31-40"
+    elif score_pct <= 50:
+        return "Score_41-50"
+    elif score_pct <= 60:
+        return "Score_51-60"
+    elif score_pct <= 70:
+        return "Score_61-70"
+    elif score_pct <= 80:
+        return "Score_71-80"
+    elif score_pct <= 90:
+        return "Score_81-90"
+    else:
+        return "Score_91-100"
+
+
+def save_overlay(original_pil, pred_mask, save_path):
+    """Saves image with red mask overlay."""
+    mask_rgb = np.zeros((pred_mask.shape[0], pred_mask.shape[1], 3), dtype=np.uint8)
+    mask_rgb[pred_mask == 1] = [255, 0, 0]
+
+    mask_pil = Image.fromarray(mask_rgb).convert("RGBA")
+    original_rgba = original_pil.convert("RGBA")
+
+    alpha = np.zeros_like(pred_mask, dtype=np.uint8)
+    alpha[pred_mask == 1] = 100
+    mask_pil.putalpha(Image.fromarray(alpha))
+
+    overlay = Image.alpha_composite(original_rgba, mask_pil)
+    overlay.save(save_path)
 
 
 def main():
     args = get_args()
-
-    # Device configuration
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     print(f"Running on: {device}")
 
-    # 1. Initialize Model
-    # PrPSeg 8-class configuration: num_classes=8, num_scale=4
-    print("Initializing UNet2D (PrPSeg 8-class)...")
-    # Note: We instantiate unet2D class directly to pass specific args
+    # --- 1. Load Model ---
+    print("Loading Model...")
     model = unet2D(layers=[1, 2, 2, 2, 2], num_classes=8, num_scale=4, weight_std=False)
 
-    # 2. Load Weights
-    if not os.path.exists(args.weights):
-        print(f"Error: Weights file not found at {args.weights}")
-        return
-
-    print(f"Loading weights from {args.weights}...")
-    checkpoint = torch.load(args.weights, map_location="cpu")
-
-    # Handle potential dictionary wrapping in checkpoint
-    if isinstance(checkpoint, dict) and "model" in checkpoint:
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
-
-    # Clean up state_dict keys if necessary (e.g. remove 'module.' prefix)
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        new_key = k.replace("module.", "") if k.startswith("module.") else k
-        new_state_dict[new_key] = v
+    checkpoint = torch.load(args.weights_path, map_location="cpu")
+    state_dict = checkpoint.get("model", checkpoint)
+    # Fix 'module.' keys if present
+    new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 
     try:
         model.load_state_dict(new_state_dict)
-    except Exception as e:
-        print(f"Warning loading weights: {e}")
-        print("Attempting strict=False load...")
+    except:
         model.load_state_dict(new_state_dict, strict=False)
 
     model.to(device)
     model.eval()
 
-    # 3. Prepare Data Transformations
-    # Resize to 512x512 (standard for this model architecture) and normalize
+    # --- 2. Setup Transform ---
     transform = transforms.Compose(
         [
             transforms.Resize((512, 512)),
             transforms.ToTensor(),
-            # Standard normalization often helps, though strictly 0-1 might work too depending on training
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
 
-    # 4. Inference Loop
+    # --- 3. Process Images ---
     dirs = [
         d
-        for d in os.listdir(args.data_root)
-        if os.path.isdir(os.path.join(args.data_root, d))
+        for d in os.listdir(args.data_path)
+        if os.path.isdir(os.path.join(args.data_path, d))
     ]
 
     for d in sorted(dirs):
-        dir_path = os.path.join(args.data_root, d)
-
-        # Determine class and scale from folder name
-        task_id, scale_id, class_name = get_class_info(d)
-
+        task_id, scale_id = get_class_info(d)
         if task_id is None:
-            print(
-                f"Skipping folder '{d}' (Class not found in 8-class model or explicitly excluded)"
-            )
-            continue
+            continue  # Skip ignored folders
 
-        print(
-            f"\nProcessing folder: {d} | Target: {class_name} (ID: {task_id}) | Scale ID: {scale_id}"
-        )
+        print(f"\nProcessing Folder: {d} (Class ID: {task_id})")
+        input_dir = os.path.join(args.data_path, d)
 
-        # Create output directory
-        save_path = os.path.join(args.output_dir, d)
-        os.makedirs(save_path, exist_ok=True)
-
-        images = (
-            glob.glob(os.path.join(dir_path, "*.png"))
-            + glob.glob(os.path.join(dir_path, "*.jpg"))
-            + glob.glob(os.path.join(dir_path, "*.jpeg"))
-        )
-
-        if not images:
-            print(f"No images found in {dir_path}")
-            continue
+        # Find images (exclude masks)
+        all_files = glob.glob(os.path.join(input_dir, "*.*"))
+        images = [
+            f
+            for f in all_files
+            if f.lower().endswith((".png", ".jpg")) and args.mask_suffix not in f
+        ]
 
         with torch.no_grad():
             for img_path in tqdm(images):
-                img_name = os.path.basename(img_path)
+                filename = os.path.splitext(os.path.basename(img_path))[0]
 
                 try:
-                    # Load and Preprocess
+                    # Load Image
                     img_pil = Image.open(img_path).convert("RGB")
-                    original_size = img_pil.size
-                    img_tensor = (
-                        transform(img_pil).unsqueeze(0).to(device)
-                    )  # (1, 3, 512, 512)
+                    w, h = img_pil.size
 
-                    # Prepare task and scale tensors
-                    task_tensor = torch.tensor([task_id], dtype=torch.float32).to(
-                        device
-                    )
-                    scale_tensor = torch.tensor([scale_id], dtype=torch.float32).to(
-                        device
-                    )
+                    # Predict
+                    img_t = transform(img_pil).unsqueeze(0).to(device)
+                    task_t = torch.tensor([task_id], dtype=torch.float32).to(device)
+                    scale_t = torch.tensor([scale_id], dtype=torch.float32).to(device)
 
-                    # Forward Pass
-                    # logits shape: (1, 2, 512, 512) -> 2 channels (background, foreground)
-                    logits = model(img_tensor, task_tensor, scale_tensor)
-
-                    # Generate Prediction
-                    # Argmax to get class 0 or 1
+                    logits = model(img_t, task_t, scale_t)
                     pred = (
                         torch.argmax(logits, dim=1)
                         .squeeze(0)
@@ -209,27 +214,68 @@ def main():
                         .astype(np.uint8)
                     )
 
-                    # Post-processing for visualization/saving
-                    # 1. Resize back to original size if necessary (Optional, typically we verify on patches)
-                    # Here we save the 512x512 result or you can use cv2.resize to put it back
+                    # Resize Pred to Original Size
+                    pred_pil = Image.fromarray(pred).resize(
+                        (w, h), resample=Image.NEAREST
+                    )
+                    pred_final = np.array(pred_pil)
 
-                    # Save binary mask (multiply by 255 to make it visible)
-                    pred_img = Image.fromarray(pred * 255)
-                    pred_img.save(
-                        os.path.join(save_path, img_name.replace(".", "_mask."))
+                    # Check for Ground Truth
+                    gt_path = os.path.join(
+                        input_dir, f"{filename}{args.mask_suffix}.png"
                     )
 
-                    # Optional: Save overlay
-                    plt.imsave(
-                        os.path.join(save_path, img_name.replace(".", "_overlay.")),
-                        pred,
-                        cmap="gray",
+                    if os.path.exists(gt_path):
+                        # Load GT
+                        gt_pil = Image.open(gt_path).convert(
+                            "L"
+                        )  # Convert to grayscale/index
+                        gt_pil = gt_pil.resize((w, h), resample=Image.NEAREST)
+                        gt_arr = np.array(gt_pil)
+
+                        # Threshold GT (assuming binary mask 0 or 255)
+                        gt_final = (gt_arr > 0).astype(np.uint8)
+
+                        # Calculate Score
+                        score = calculate_dice(pred_final, gt_final)
+                        folder_name = get_score_folder(score)
+
+                    else:
+                        folder_name = "No_GroundTruth"
+                        gt_path = None  # Marker that no GT exists
+
+                    # Create Save Directory
+                    save_dir = os.path.join(args.output_folder, folder_name)
+                    os.makedirs(save_dir, exist_ok=True)
+
+                    # Save Files
+                    # 1. Original
+                    shutil.copy(
+                        img_path, os.path.join(save_dir, f"{filename}_orig.png")
                     )
+
+                    # 2. Predicted Mask
+                    Image.fromarray(pred_final * 255).save(
+                        os.path.join(save_dir, f"{filename}_pred.png")
+                    )
+
+                    # 3. Overlay
+                    save_overlay(
+                        img_pil,
+                        pred_final,
+                        os.path.join(save_dir, f"{filename}_overlay.png"),
+                    )
+
+                    # 4. Ground Truth (if exists)
+                    if gt_path:
+                        shutil.copy(
+                            gt_path, os.path.join(save_dir, f"{filename}_gt.png")
+                        )
 
                 except Exception as e:
-                    print(f"Failed to process {img_name}: {e}")
+                    print(f"Failed {filename}: {e}")
 
-    print(f"\nProcessing complete. Results saved to {args.output_dir}")
+    print(f"\nProcessing Complete. Results sorted in: {args.output_folder}")
 
 
 if __name__ == "__main__":
