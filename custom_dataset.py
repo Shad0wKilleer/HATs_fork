@@ -3,8 +3,11 @@ from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import imgaug.augmenters as iaa
 import os
+
+# Modern PyTorch Transforms
+from torchvision.transforms import v2
+from torchvision import tv_tensors
 
 
 class RenalDataset(Dataset):
@@ -32,22 +35,35 @@ class RenalDataset(Dataset):
         self.data = pd.concat(dataframes, ignore_index=True)
         print(f"Dataset Loaded: {len(self.data)} images.")
 
-        # 2. Augmentations (Applied AFTER cropping)
+        # 2. Define Pure PyTorch Augmentations
         if is_training:
-            self.aug_pipeline = iaa.Sequential(
+            self.transforms = v2.Compose(
                 [
-                    # Geometric
-                    iaa.Affine(rotate=(-180, 180)),
-                    iaa.Affine(translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)}),
-                    iaa.Fliplr(0.5),
-                    iaa.Flipud(0.5),
-                    # Color
-                    iaa.GammaContrast((0.8, 1.2)),
-                    iaa.AddToHueAndSaturation((-10, 10)),
+                    # Geometric (Applies to Image + Mask)
+                    v2.RandomHorizontalFlip(p=0.5),
+                    v2.RandomVerticalFlip(p=0.5),
+                    v2.RandomAffine(
+                        degrees=180,
+                        translate=(0.1, 0.1),  # +/- 10% shift
+                        scale=None,  # NO resizing/zooming
+                        shear=None,
+                    ),
+                    # Color (Applies to Image ONLY automatically)
+                    # mild brightness (gamma proxy) and stain jitter
+                    v2.ColorJitter(
+                        brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05
+                    ),
+                    # Ensure float32 0-1 range
+                    v2.ToDtype(torch.float32, scale=True),
                 ]
             )
         else:
-            self.aug_pipeline = None  # No augmentation for validation
+            # Validation: Just normalize
+            self.transforms = v2.Compose(
+                [
+                    v2.ToDtype(torch.float32, scale=True),
+                ]
+            )
 
     def __len__(self):
         return len(self.data)
@@ -56,14 +72,11 @@ class RenalDataset(Dataset):
         row = self.data.iloc[index]
         task_id = int(row["class_index"])
 
-        # 1. Load Full Image (3000x3000px)
-        # Optimization: We read full image.
-        # For huge WSIs, libraries like OpenSlide are better,
-        # but for 3000x3000px PNGs, plt.imread is fast enough (~30MB RAM).
+        # 1. Load Full Image (Numpy)
         image = plt.imread(row["image_path"])
         mask = plt.imread(row["mask_path"])
 
-        # Formatting
+        # Formatting (Numpy)
         if image.ndim == 2:
             image = np.stack([image] * 3, axis=-1)
         if image.shape[2] > 3:
@@ -71,7 +84,7 @@ class RenalDataset(Dataset):
         if mask.ndim == 3:
             mask = mask[:, :, 0]
 
-        # Normalize to uint8 [0, 255] for processing
+        # Ensure uint8 [0, 255]
         if image.dtype != np.uint8:
             image = (
                 (image * 255).astype(np.uint8)
@@ -85,51 +98,46 @@ class RenalDataset(Dataset):
                 else mask.astype(np.uint8)
             )
 
-        # 2. INTELLIGENT CROPPING
+        # 2. INTELLIGENT CROPPING (Numpy)
+        # We do this in Numpy before converting to Tensor for speed/ease
         h, w = image.shape[:2]
 
         # Default: Random Crop
-        top = np.random.randint(0, h - self.crop_h)
-        left = np.random.randint(0, w - self.crop_w)
+        top = np.random.randint(0, h - self.crop_h) if h > self.crop_h else 0
+        left = np.random.randint(0, w - self.crop_w) if w > self.crop_w else 0
 
-        # Force Foreground Logic:
-        # If training AND we have a mask AND it's a sparse class (or just 50% of time for all)
-        # Let's apply it to ALL classes to be safe, especially Tuft/Cap.
+        # Force Foreground Logic (Training only)
         if self.is_training:
-            # Find all pixels that are part of the object
-            # (mask > 0 assuming binary mask 0/255)
             y_indices, x_indices = np.where(mask > 127)
-
-            # If the image actually contains the object (is not empty)
-            if len(y_indices) > 0:
-                # 50% chance to force the crop to be centered on an object
-                if np.random.rand() < 0.5:
-                    # Pick a random pixel belonging to the object
-                    idx = np.random.randint(len(y_indices))
-                    center_y, center_x = y_indices[idx], x_indices[idx]
-
-                    # Calculate Top-Left coordinate to center this pixel
-                    top = center_y - (self.crop_h // 2)
-                    left = center_x - (self.crop_w // 2)
-
-                    # Clip to image boundaries (don't go outside)
-                    top = np.clip(top, 0, h - self.crop_h)
-                    left = np.clip(left, 0, w - self.crop_w)
+            if len(y_indices) > 0 and np.random.rand() < 0.5:
+                idx = np.random.randint(len(y_indices))
+                center_y, center_x = y_indices[idx], x_indices[idx]
+                top = np.clip(center_y - (self.crop_h // 2), 0, h - self.crop_h)
+                left = np.clip(center_x - (self.crop_w // 2), 0, w - self.crop_w)
 
         # Apply Crop
         image = image[top : top + self.crop_h, left : left + self.crop_w, :]
         mask = mask[top : top + self.crop_h, left : left + self.crop_w]
 
-        # Mask needs channel dim for imgaug
-        mask = mask[:, :, np.newaxis]
+        # 3. Convert to Torch Tensors & Wrap for v2
+        # Image: [H, W, C] -> [C, H, W]
+        img_tensor = torch.from_numpy(image).permute(2, 0, 1)
+        # Mask: [H, W] -> [1, H, W] (Needs channel dim)
+        mask_tensor = torch.from_numpy(mask).unsqueeze(0)
 
-        # 3. Apply Augmentations (Rotation/Color)
-        if self.aug_pipeline:
-            image, mask = self.aug_pipeline(image=image, segmentation_maps=mask)
+        # WRAPPER: This tells v2 "This is an Image" and "This is a Mask"
+        # So it knows to use Bilinear interpolation for Image and Nearest Neighbor for Mask
+        img_wrapped = tv_tensors.Image(img_tensor)
+        mask_wrapped = tv_tensors.Mask(mask_tensor)
 
-        # 4. Final Tensor Formatting
-        image = image.transpose((2, 0, 1)).astype(np.float32) / 255.0
-        mask = mask[:, :, 0]
-        mask = (mask > 127).astype(np.float32)
+        # 4. Apply Transforms
+        if self.transforms:
+            img_wrapped, mask_wrapped = self.transforms(img_wrapped, mask_wrapped)
 
-        return image, mask, task_id, 0  # scale_id=0
+        # 5. Final Cleanup
+        # Remove wrappers, ensure mask is binary 0.0/1.0 float
+        # Mask comes out as [1, H, W], we remove channel dim to get [H, W] for Dice Loss
+        final_img = img_wrapped
+        final_mask = (mask_wrapped[0] > 0.5).float()  # Threshold back to binary
+
+        return final_img, final_mask, task_id, 0  # scale_id=0
