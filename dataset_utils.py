@@ -1,30 +1,19 @@
+import torch
 from torch.utils.data import Sampler
 import random
+import numpy as np
 
 
 class TaskBalancedBatchSampler(Sampler):
     """
-    A Custom Sampler for Multi-Task Learning.
-
-    Problem: The PrPSeg architecture requires all images in a single batch
-             to belong to the SAME Task (Class) to generate the correct tokens.
-
-    Solution: This sampler organizes indices by class. It yields a batch of
-              Class A, then a batch of Class B, etc., in a round-robin fashion.
+    Fixed: Now strictly stops after one epoch worth of batches.
     """
 
     def __init__(self, dataset_task_ids, batch_size):
-        """
-        Args:
-            dataset_task_ids: A list of class IDs corresponding to the dataset.
-                              e.g. [0, 0, 1, 2, 0, ...]
-            batch_size: The size of the batch (e.g. 4)
-        """
         self.batch_size = batch_size
         self.class_indices = {}
 
-        # 1. Group all image indices by their Task ID
-        # Result: {0: [idx1, idx5...], 1: [idx2, idx3...]}
+        # Group indices by task
         for idx, task_id in enumerate(dataset_task_ids):
             if task_id not in self.class_indices:
                 self.class_indices[task_id] = []
@@ -32,54 +21,42 @@ class TaskBalancedBatchSampler(Sampler):
 
         self.tasks = list(self.class_indices.keys())
 
-        # 2. Calculate Epoch Length
-        # We define one epoch as roughly covering all images.
-        # We calculate how many batches the largest class would generate,
-        # and multiply by number of classes to ensure we loop enough times.
+        # Calculate Epoch Length (Total batches needed to cover largest class)
+        # For your 50/50 split, this will be exactly 50 batches.
         max_len = max([len(v) for v in self.class_indices.values()])
         self.num_batches = (max_len // batch_size) * len(self.tasks)
 
     def __iter__(self):
-        # 1. Shuffle indices INSIDE each class bucket
-        # This ensures we don't see the same "Proximal Tubule" images in the same order.
+        # 1. Shuffle indices INSIDE each class bucket at start of epoch
         for t in self.tasks:
             random.shuffle(self.class_indices[t])
 
-        # Pointers track our progress through each bucket
         pointers = {t: 0 for t in self.tasks}
+        total_yielded = 0  # <--- The Counter that fixes the infinite loop
 
-        # 2. The Generation Loop
-        while True:
-            # Randomize the order of tasks (e.g. Tuft -> PT -> Cap vs PT -> Cap -> Tuft)
-            # This prevents the model from learning a fixed order.
+        while total_yielded < self.num_batches:
+            # Randomize task order for this round
             random.shuffle(self.tasks)
 
-            batches_yielded_this_round = 0
-
             for t in self.tasks:
+                # Stop if we hit the limit
+                if total_yielded >= self.num_batches:
+                    return
+
                 start = pointers[t]
 
-                # Check if we have enough data left in this bucket
-                # If we ran out, we re-shuffle and loop back (Oversampling logic)
-                # allowing rare classes to be seen as often as common classes.
+                # Check if we run out of data in this bucket
                 if start + self.batch_size > len(self.class_indices[t]):
+                    # Reshuffle and loop back (Oversampling for small classes)
                     random.shuffle(self.class_indices[t])
                     pointers[t] = 0
                     start = 0
 
-                # Yield the batch indices
-                end = start + self.batch_size
-                yield self.class_indices[t][start:end]
+                # Yield the batch
+                yield self.class_indices[t][start : start + self.batch_size]
 
-                # Advance pointer
                 pointers[t] += self.batch_size
-                batches_yielded_this_round += 1
-
-            # Stop condition: In standard PyTorch, __len__ controls the progress bar,
-            # but we break here just in case.
-            # (Ideally, the DataLoader stops calling next() when it hits __len__)
-            if batches_yielded_this_round == 0:
-                break
+                total_yielded += 1
 
     def __len__(self):
         return self.num_batches
