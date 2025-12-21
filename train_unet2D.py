@@ -497,8 +497,6 @@ def main():
                         now_task = t_idx
                         weight = args.edge_weight**wts
 
-                        optimizer.zero_grad()
-
                         # --- UPDATED TRAINING STEP ---
                         with autocast(enabled=args.FP16):
                             term_seg_Dice, term_seg_BCE, Sup_term_all = (
@@ -533,15 +531,15 @@ def main():
                                 Area_ratio,
                             )
 
-                        # LOGIC FIX: Backward on LOCAL loss (All_term_all), not reduced loss
-                        scaler.scale(All_term_all).backward()
+                        reduce_Dice = engine.all_reduce_tensor(term_seg_Dice)
+                        reduce_BCE = engine.all_reduce_tensor(term_seg_BCE)
+                        reduce_all = engine.all_reduce_tensor(All_term_all)
+
+                        optimizer.zero_grad()
+                        # Use Scaler for backward
+                        scaler.scale(reduce_all).backward()
                         scaler.step(optimizer)
                         scaler.update()
-
-                        # REDUCE only for logging (using detach to avoid graph issues)
-                        reduce_Dice = engine.all_reduce_tensor(term_seg_Dice.detach())
-                        reduce_BCE = engine.all_reduce_tensor(term_seg_BCE.detach())
-                        reduce_all = engine.all_reduce_tensor(All_term_all.detach())
 
                         if iter % 50 == 0:
                             print(
@@ -556,7 +554,7 @@ def main():
                                 )
                             )
 
-                        supervise_all = engine.all_reduce_tensor(Sup_term_all.detach())
+                        supervise_all = engine.all_reduce_tensor(Sup_term_all)
                         supervised_loss[now_task] += supervise_all
                         each_loss[now_task] += reduce_all
                         count_batch[now_task] += 1
@@ -576,8 +574,6 @@ def main():
 
                     now_task = t_idx
                     weight = args.edge_weight**wts
-
-                    optimizer.zero_grad()
 
                     with autocast(enabled=args.FP16):
                         term_seg_Dice, term_seg_BCE, Sup_term_all = supervise_learning(
@@ -609,15 +605,13 @@ def main():
                             Area_ratio,
                         )
 
-                    # LOGIC FIX: Backward on LOCAL loss
-                    scaler.scale(All_term_all).backward()
+                    reduce_all = engine.all_reduce_tensor(All_term_all)
+                    optimizer.zero_grad()
+                    scaler.scale(reduce_all).backward()
                     scaler.step(optimizer)
                     scaler.update()
 
-                    # Reduce for logging
-                    reduce_all = engine.all_reduce_tensor(All_term_all.detach())
-                    supervise_all = engine.all_reduce_tensor(Sup_term_all.detach())
-
+                    supervise_all = engine.all_reduce_tensor(Sup_term_all)
                     supervised_loss[now_task] += supervise_all
                     each_loss[now_task] += reduce_all
                     count_batch[now_task] += 1

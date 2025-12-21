@@ -2,14 +2,11 @@ import os
 import argparse
 import torch
 import torch.distributed as dist
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from utils_engine.logger import get_logger
 from utils_engine.pyt_utils import all_reduce_tensor
-
-try:
-    from apex.parallel import DistributedDataParallel, SyncBatchNorm
-except ImportError:
-    raise ImportError("Please install apex from https://www.github.com/nvidia/apex .")
 
 logger = get_logger()
 
@@ -39,14 +36,22 @@ class Engine(object):
             dist.init_process_group(backend="nccl", init_method="env://")
             self.devices = [i for i in range(self.world_size)]
         else:
-            gpus = os.environ["CUDA_VISIBLE_DEVICES"]
-            self.devices = [i for i in range(len(gpus.split(",")))]
+            gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            self.devices = [i for i in range(len(gpus.split(",")))] if gpus else []
 
     def data_parallel(self, model):
         if self.distributed:
-            model = DistributedDataParallel(model)
+            # Native PyTorch DDP
+            # Note: Native DDP requires model to be on device before wrapping (handled in train script)
+            model = DDP(
+                model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+                find_unused_parameters=False,
+            )
         else:
-            model = torch.nn.DataParallel(model)
+            # Legacy DataParallel for single-node multi-GPU
+            model = nn.DataParallel(model)
         return model
 
     def all_reduce_tensor(self, tensor, norm=True):

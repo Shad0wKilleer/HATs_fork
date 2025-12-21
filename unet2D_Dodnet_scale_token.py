@@ -219,73 +219,49 @@ class unet2D(nn.Module):
         return x
 
     def forward(self, input, task_id, scale_id):
-        now_cls_token = self.cls_emb.repeat(input.shape[0], 1, 1)
-        now_sls_token = self.sls_emb.repeat(input.shape[0], 1, 1)
+        # FIX: Use indexing to select correct task/scale per item in batch
+        batch_size = input.shape[0]
+        batch_indices = torch.arange(batch_size, device=input.device)
+
+        # Ensure indices are integers (long)
+        t_ids = task_id.long()
+        s_ids = scale_id.long()
+
+        # now_cls_token: (1, num_classes, feat_dim) -> select specific class per batch item
+        # We index into self.cls_emb directly
+        # selected_cls: (B, 1, feat_dim)
+        selected_cls = self.cls_emb[:, t_ids, :].permute(1, 0, 2)
+        selected_sls = self.sls_emb[:, s_ids, :].permute(1, 0, 2)
+
         x_start = 0
         x_end = x_start + 32
-        cls_token0 = (
-            now_cls_token[:, int(task_id[0]), x_start:x_end].unsqueeze(-1).unsqueeze(-1)
-        )
-        sls_token0 = (
-            now_sls_token[:, int(scale_id[0]), x_start:x_end]
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        cls_token0 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
+        sls_token0 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 32
-        cls_token1 = (
-            now_cls_token[:, int(task_id[0]), x_start:x_end].unsqueeze(-1).unsqueeze(-1)
-        )
-        sls_token1 = (
-            now_sls_token[:, int(scale_id[0]), x_start:x_end]
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        cls_token1 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
+        sls_token1 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 64
-        cls_token2 = (
-            now_cls_token[:, int(task_id[0]), x_start:x_end].unsqueeze(-1).unsqueeze(-1)
-        )
-        sls_token2 = (
-            now_sls_token[:, int(scale_id[0]), x_start:x_end]
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        cls_token2 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
+        sls_token2 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 128
-        cls_token3 = (
-            now_cls_token[:, int(task_id[0]), x_start:x_end].unsqueeze(-1).unsqueeze(-1)
-        )
-        sls_token3 = (
-            now_sls_token[:, int(scale_id[0]), x_start:x_end]
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        cls_token3 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
+        sls_token3 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 256
-        cls_token4 = (
-            now_cls_token[:, int(task_id[0]), x_start:x_end].unsqueeze(-1).unsqueeze(-1)
-        )
-        sls_token4 = (
-            now_sls_token[:, int(scale_id[0]), x_start:x_end]
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        cls_token4 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
+        sls_token4 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 256
-        cls_token_head = (
-            now_cls_token[:, int(task_id[0]), x_start:x_end].unsqueeze(-1).unsqueeze(-1)
-        )
-        sls_token_head = (
-            now_sls_token[:, int(scale_id[0]), x_start:x_end]
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
+        cls_token_head = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
+        sls_token_head = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
 
         x = self.conv1(input)
 

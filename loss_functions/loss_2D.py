@@ -24,9 +24,14 @@ class BinaryDiceLoss(nn.Module):
         dice_score = 2 * num / den
         dice_loss = 1 - dice_score
 
-        dice_loss_avg = (
-            dice_loss[target[:, 0] != -1].sum() / dice_loss[target[:, 0] != -1].shape[0]
-        )
+        # Avoid potential division by zero if all targets are -1
+        valid_mask = target[:, 0] != -1
+        if valid_mask.sum() > 0:
+            dice_loss_avg = dice_loss[valid_mask].sum() / valid_mask.shape[0]
+        else:
+            dice_loss_avg = (
+                dice_loss.sum() * 0
+            )  # Return 0 with gradient connection if needed
 
         return dice_loss_avg
 
@@ -42,13 +47,13 @@ class DiceLoss4MOTS(nn.Module):
 
     def forward(self, predict, target, weight):
         total_loss = []
-        predict = F.sigmoid(predict)
+        # UPDATED: F.sigmoid is deprecated
+        predict = torch.sigmoid(predict)
 
         for i in range(self.num_classes):
             if i != self.ignore_index:
                 dice_loss = self.dice(predict[:, i], target[:, i], weight)
                 if self.weight is not None:
-                    # Fixed typo from original code: self.weights -> self.weight
                     assert self.weight.shape[0] == self.num_classes, (
                         "Expect weight shape [{}], get[{}]".format(
                             self.num_classes, self.weight.shape[0]
@@ -58,6 +63,7 @@ class DiceLoss4MOTS(nn.Module):
                 total_loss.append(dice_loss)
 
         total_loss = torch.stack(total_loss)
+        # Filter out NaNs if any exist
         total_loss = total_loss[total_loss == total_loss]
 
         return total_loss.sum() / total_loss.shape[0]
@@ -80,10 +86,11 @@ class CELoss4MOTS(nn.Module):
                 ce_loss = self.criterion(predict[:, i], target[:, i]) * weight
                 ce_loss = torch.mean(ce_loss, dim=[1, 2])
 
-                ce_loss_avg = (
-                    ce_loss[target[:, i, 0, 0] != -1].sum()
-                    / ce_loss[target[:, i, 0, 0] != -1].shape[0]
-                )
+                valid_mask = target[:, i, 0, 0] != -1
+                if valid_mask.sum() > 0:
+                    ce_loss_avg = ce_loss[valid_mask].sum() / valid_mask.shape[0]
+                else:
+                    ce_loss_avg = ce_loss.sum() * 0
 
                 total_loss.append(ce_loss_avg)
 
