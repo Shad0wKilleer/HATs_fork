@@ -7,16 +7,16 @@ import torch.backends.cudnn as cudnn
 import matplotlib.pyplot as plt
 import os.path as osp
 import timeit
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import f1_score, confusion_matrix
 from torch.utils.data import DataLoader, DistributedSampler
+from torch.cuda.amp import GradScaler, autocast
 
 # Local imports
 from MOTSDataset_2D_Patch_supervise_csv_512 import MOTSDataSet
 from MOTSDataset_2D_Patch_supervise_csv_512 import MOTSValDataSet
 import loss_functions.loss_2D as loss
 from engine import Engine
-from apex import amp
 from util_a.image_pool import ImagePool
 from unet2D_Dodnet_scale_token import UNet2D as UNet2D_scale
 
@@ -290,9 +290,10 @@ def main():
             model.parameters(), args.learning_rate, weight_decay=args.weight_decay
         )
 
+        # Initialize AMP Scaler
+        scaler = GradScaler(enabled=args.FP16)
         if args.FP16:
-            print("Note: Using FP16 during training************")
-            model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+            print("Note: Using Native Torch AMP (FP16) during training************")
 
         if args.num_gpus > 1:
             model = engine.data_parallel(model)
@@ -300,17 +301,17 @@ def main():
         if args.reload_from_checkpoint:
             print("loading from checkpoint: {}".format(args.reload_path))
             if os.path.exists(args.reload_path):
-                if args.FP16:
-                    checkpoint = torch.load(
-                        args.reload_path, map_location=torch.device("cpu")
-                    )
-                    model.load_state_dict(checkpoint["model"])
-                    optimizer.load_state_dict(checkpoint["optimizer"])
-                    amp.load_state_dict(checkpoint["amp"])
-                else:
-                    model.load_state_dict(
-                        torch.load(args.reload_path, map_location=torch.device("cpu")),
-                        strict=False,
+                checkpoint = torch.load(
+                    args.reload_path, map_location=torch.device("cpu")
+                )
+                model.load_state_dict(checkpoint["model"])
+                optimizer.load_state_dict(checkpoint["optimizer"])
+                if args.FP16 and "scaler" in checkpoint:
+                    scaler.load_state_dict(checkpoint["scaler"])
+                elif args.FP16 and "amp" in checkpoint:
+                    print(
+                        "Warning: Found legacy 'apex.amp' state in checkpoint. "
+                        "Cannot load into 'torch.cuda.amp.GradScaler'. Starting scaler fresh."
                     )
             else:
                 print("File not exists in the reload path: {}".format(args.reload_path))
@@ -373,6 +374,7 @@ def main():
         HATs_matrix = np.zeros((15, 15))
 
         Area = np.zeros((15))
+        # ... [Keep Area initialization] ...
         Area[0] = 2.434
         Area[1] = 2.600
         Area[2] = 1.760
@@ -394,50 +396,38 @@ def main():
             for yi in range(0, 15):
                 Area_ratio[xi, yi] = division_ratio(Area[xi], Area[yi])
 
-        # Matrix initialization (Collapsed for brevity but logic preserved)
-        # Medulla
+        # Matrix initialization
+        # ... [Keep Matrix Initialization logic same as original] ...
         HATs_matrix[0, [1, 2, 3, 4, 7, 8, 10, 12, 13]] = 2
         HATs_matrix[0, 11] = 1
-        # Cortex
         HATs_matrix[1, 0] = 2
         HATs_matrix[1, [2, 3, 4, 7, 8, 10, 12, 13]] = 1
         HATs_matrix[1, 11] = 2
-        # Cortex Parts
         for i in [2, 3, 4]:
             HATs_matrix[i, 0] = 2
             HATs_matrix[i, 1] = -1
             HATs_matrix[i, [j for j in [2, 3, 4] if j != i]] = 2
-        # DT
         HATs_matrix[5, [6, 7, 8, 9, 10, 11, 12, 13, 14]] = 2
-        # PT
         HATs_matrix[6, [5, 7, 8, 9, 10, 11, 12, 13, 14]] = 2
-        # Cap
         HATs_matrix[7, [0, 5, 6, 9, 10, 11, 14]] = 2
         HATs_matrix[7, 1] = -1
         HATs_matrix[7, [8, 12, 13]] = 1
-        # Tuft
         HATs_matrix[8, [0, 5, 6, 9, 10, 11, 14]] = 2
         HATs_matrix[8, 1] = -1
         HATs_matrix[8, 7] = -1
         HATs_matrix[8, [12, 13]] = 1
-        # Art
         HATs_matrix[9, [5, 6, 7, 8, 10, 11, 12, 13]] = 2
         HATs_matrix[9, 14] = 1
-        # PTC
         HATs_matrix[10, [0, 5, 6, 7, 8, 9, 11, 12, 13, 14]] = 2
         HATs_matrix[10, 1] = -1
-        # MV
         HATs_matrix[11, 0] = -1
         HATs_matrix[11, [1, 5, 6, 7, 8, 9, 10, 12, 13, 14]] = 2
-        # Pod
         HATs_matrix[12, [0, 5, 6, 9, 10, 11, 13, 14]] = 2
         HATs_matrix[12, 1] = -1
         HATs_matrix[12, [7, 8]] = -1
-        # Mes
         HATs_matrix[13, [0, 5, 6, 9, 10, 11, 12, 14]] = 2
         HATs_matrix[13, 1] = -1
         HATs_matrix[13, [7, 8]] = -1
-        # Smooth
         HATs_matrix[14, [5, 6, 7, 8, 10, 11, 12, 13]] = 2
         HATs_matrix[14, 9] = -1
 
@@ -507,43 +497,51 @@ def main():
                         now_task = t_idx
                         weight = args.edge_weight**wts
 
-                        term_seg_Dice, term_seg_BCE, Sup_term_all = supervise_learning(
-                            images,
-                            labels,
-                            args.batch_size,
-                            scales,
-                            model,
-                            now_task,
-                            weight,
-                            loss_seg_DICE,
-                            loss_seg_CE,
-                        )
-
-                        term_seg_Dice, term_seg_BCE, All_term_all = HATs_learning(
-                            images,
-                            labels,
-                            args.batch_size,
-                            scales,
-                            model,
-                            now_task,
-                            weight,
-                            loss_seg_DICE,
-                            loss_seg_CE,
-                            term_seg_Dice,
-                            term_seg_BCE,
-                            Sup_term_all,
-                            HATs_matrix,
-                            semi_ratio,
-                            Area_ratio,
-                        )
-
-                        reduce_Dice = engine.all_reduce_tensor(term_seg_Dice)
-                        reduce_BCE = engine.all_reduce_tensor(term_seg_BCE)
-                        reduce_all = engine.all_reduce_tensor(All_term_all)
-
                         optimizer.zero_grad()
-                        reduce_all.backward()
-                        optimizer.step()
+
+                        # --- UPDATED TRAINING STEP ---
+                        with autocast(enabled=args.FP16):
+                            term_seg_Dice, term_seg_BCE, Sup_term_all = (
+                                supervise_learning(
+                                    images,
+                                    labels,
+                                    args.batch_size,
+                                    scales,
+                                    model,
+                                    now_task,
+                                    weight,
+                                    loss_seg_DICE,
+                                    loss_seg_CE,
+                                )
+                            )
+
+                            term_seg_Dice, term_seg_BCE, All_term_all = HATs_learning(
+                                images,
+                                labels,
+                                args.batch_size,
+                                scales,
+                                model,
+                                now_task,
+                                weight,
+                                loss_seg_DICE,
+                                loss_seg_CE,
+                                term_seg_Dice,
+                                term_seg_BCE,
+                                Sup_term_all,
+                                HATs_matrix,
+                                semi_ratio,
+                                Area_ratio,
+                            )
+
+                        # LOGIC FIX: Backward on LOCAL loss (All_term_all), not reduced loss
+                        scaler.scale(All_term_all).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+
+                        # REDUCE only for logging (using detach to avoid graph issues)
+                        reduce_Dice = engine.all_reduce_tensor(term_seg_Dice.detach())
+                        reduce_BCE = engine.all_reduce_tensor(term_seg_BCE.detach())
+                        reduce_all = engine.all_reduce_tensor(All_term_all.detach())
 
                         if iter % 50 == 0:
                             print(
@@ -558,7 +556,7 @@ def main():
                                 )
                             )
 
-                        supervise_all = engine.all_reduce_tensor(Sup_term_all)
+                        supervise_all = engine.all_reduce_tensor(Sup_term_all.detach())
                         supervised_loss[now_task] += supervise_all
                         each_loss[now_task] += reduce_all
                         count_batch[now_task] += 1
@@ -579,41 +577,47 @@ def main():
                     now_task = t_idx
                     weight = args.edge_weight**wts
 
-                    term_seg_Dice, term_seg_BCE, Sup_term_all = supervise_learning(
-                        images,
-                        labels,
-                        current_batch_size,
-                        scales,
-                        model,
-                        now_task,
-                        weight,
-                        loss_seg_DICE,
-                        loss_seg_CE,
-                    )
-                    term_seg_Dice, term_seg_BCE, All_term_all = HATs_learning(
-                        images,
-                        labels,
-                        current_batch_size,
-                        scales,
-                        model,
-                        now_task,
-                        weight,
-                        loss_seg_DICE,
-                        loss_seg_CE,
-                        term_seg_Dice,
-                        term_seg_BCE,
-                        Sup_term_all,
-                        HATs_matrix,
-                        semi_ratio,
-                        Area_ratio,
-                    )
-
-                    reduce_all = engine.all_reduce_tensor(All_term_all)
                     optimizer.zero_grad()
-                    reduce_all.backward()
-                    optimizer.step()
 
-                    supervise_all = engine.all_reduce_tensor(Sup_term_all)
+                    with autocast(enabled=args.FP16):
+                        term_seg_Dice, term_seg_BCE, Sup_term_all = supervise_learning(
+                            images,
+                            labels,
+                            current_batch_size,
+                            scales,
+                            model,
+                            now_task,
+                            weight,
+                            loss_seg_DICE,
+                            loss_seg_CE,
+                        )
+                        term_seg_Dice, term_seg_BCE, All_term_all = HATs_learning(
+                            images,
+                            labels,
+                            current_batch_size,
+                            scales,
+                            model,
+                            now_task,
+                            weight,
+                            loss_seg_DICE,
+                            loss_seg_CE,
+                            term_seg_Dice,
+                            term_seg_BCE,
+                            Sup_term_all,
+                            HATs_matrix,
+                            semi_ratio,
+                            Area_ratio,
+                        )
+
+                    # LOGIC FIX: Backward on LOCAL loss
+                    scaler.scale(All_term_all).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                    # Reduce for logging
+                    reduce_all = engine.all_reduce_tensor(All_term_all.detach())
+                    supervise_all = engine.all_reduce_tensor(Sup_term_all.detach())
+
                     supervised_loss[now_task] += supervise_all
                     each_loss[now_task] += reduce_all
                     count_batch[now_task] += 1
@@ -637,7 +641,6 @@ def main():
                 )
                 writer.add_scalar("Train_loss", epoch_loss.item(), epoch)
 
-                # Plotting code (simplified)
                 plt.plot(all_tr_loss_supervise, label="Supervise")
                 plt.plot(all_tr_loss_all, label="Supervise + Psuedo")
                 plt.legend()
@@ -663,9 +666,7 @@ def main():
                     for i in range(15)
                 }
 
-                val_metrics = {
-                    k: np.zeros(15) for k in ["F1", "Dice", "TPR", "PPV", "Cnt"]
-                }
+                val_metrics = np.zeros((5, 15))
 
                 with torch.no_grad():
                     for batch1 in valloader:
@@ -691,12 +692,12 @@ def main():
                                 for bi in range(len(scales)):
                                     scales[bi] = pool["scale"].pop(0)
 
-                                # Validation Inference
+                                # Validation runs in FP32 usually, but ok to use autocast
+                                # here we skip autocast for val unless memory is tight.
                                 if t_idx <= 4:
                                     preds = torch.zeros(
                                         (args.batch_size, 2, 1024, 1024)
                                     ).cuda()
-                                    # Forward 4 quadrants (top-left, top-right, bottom-right, bottom-left)
                                     crops = [
                                         (0, 512, 0, 512),
                                         (0, 512, 512, 1024),
@@ -738,13 +739,13 @@ def main():
                                     cmin,
                                     cmax,
                                 )
-                                val_metrics["F1"][t_idx] += F1
-                                val_metrics["Dice"][t_idx] += DICE
-                                val_metrics["TPR"][t_idx] += TPR
-                                val_metrics["PPV"][t_idx] += PPV
-                                val_metrics["Cnt"][t_idx] += 1
+                                val_metrics[0, t_idx] += F1
+                                val_metrics[1, t_idx] += DICE
+                                val_metrics[2, t_idx] += TPR
+                                val_metrics[3, t_idx] += PPV
+                                val_metrics[4, t_idx] += 1
 
-                    # Clean up remaining validation samples
+                    # Clean up (remaining validation batches)
                     for t_idx in range(15):
                         pool = val_pools[t_idx]
                         if pool["image"].num_imgs > 0:
@@ -792,23 +793,32 @@ def main():
                             F1, DICE, TPR, PPV = count_score(
                                 now_preds_onehot, labels_onehot, rmin, rmax, cmin, cmax
                             )
-                            val_metrics["F1"][t_idx] += F1
-                            val_metrics["Dice"][t_idx] += DICE
-                            val_metrics["TPR"][t_idx] += TPR
-                            val_metrics["PPV"][t_idx] += PPV
-                            val_metrics["Cnt"][t_idx] += 1
+                            val_metrics[0, t_idx] += F1
+                            val_metrics[1, t_idx] += DICE
+                            val_metrics[2, t_idx] += TPR
+                            val_metrics[3, t_idx] += PPV
+                            val_metrics[4, t_idx] += 1
 
-                    # Average and Report
-                    for k in ["F1", "Dice", "TPR", "PPV"]:
-                        val_metrics[k] /= val_metrics["Cnt"] + 1e-6
+                    if engine.distributed:
+                        val_metrics_tensor = torch.tensor(val_metrics).float().cuda()
+                        val_metrics_tensor = engine.all_reduce_tensor(
+                            val_metrics_tensor, norm=False
+                        )
+                        val_metrics = val_metrics_tensor.cpu().numpy()
+
+                    cnt = val_metrics[4, :] + 1e-6
+                    avg_F1 = val_metrics[0, :] / cnt
+                    avg_Dice = val_metrics[1, :] / cnt
+                    avg_TPR = val_metrics[2, :] / cnt
+                    avg_PPV = val_metrics[3, :] / cnt
 
                     df_val = pd.DataFrame(
                         {
                             "Task": range(15),
-                            "F1": val_metrics["F1"],
-                            "Dice": val_metrics["Dice"],
-                            "TPR": val_metrics["TPR"],
-                            "PPV": val_metrics["PPV"],
+                            "F1": avg_F1,
+                            "Dice": avg_Dice,
+                            "TPR": avg_TPR,
+                            "PPV": avg_PPV,
                         }
                     )
                     print("Validation Results:\n", df_val)
@@ -821,7 +831,8 @@ def main():
                 state = {
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    "amp": amp.state_dict() if args.FP16 else None,
+                    # Saving Scaler State instead of Amp
+                    "scaler": scaler.state_dict() if args.FP16 else None,
                 }
                 torch.save(
                     state, osp.join(args.snapshot_dir, f"UNet2D_DynConv_e{epoch}.pth")
