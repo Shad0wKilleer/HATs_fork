@@ -213,40 +213,40 @@ class unet2D(nn.Module):
         s_ids = scale_id.long()
 
         # now_cls_token: (1, num_classes, feat_dim) -> select specific class per batch item
-        # We index into self.cls_emb directly
         # selected_cls: (B, 1, feat_dim)
         selected_cls = self.cls_emb[:, t_ids, :].permute(1, 0, 2)
         selected_sls = self.sls_emb[:, s_ids, :].permute(1, 0, 2)
 
+        # FIXED: Reshaped tokens to (Batch, C, 1, 1) to match feature map (Batch, C, H, W)
         x_start = 0
         x_end = x_start + 32
-        cls_token0 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
-        sls_token0 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
+        cls_token0 = selected_cls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
+        sls_token0 = selected_sls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 32
-        cls_token1 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
-        sls_token1 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
+        cls_token1 = selected_cls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
+        sls_token1 = selected_sls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 64
-        cls_token2 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
-        sls_token2 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
+        cls_token2 = selected_cls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
+        sls_token2 = selected_sls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 128
-        cls_token3 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
-        sls_token3 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
+        cls_token3 = selected_cls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
+        sls_token3 = selected_sls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 256
-        cls_token4 = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
-        sls_token4 = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
+        cls_token4 = selected_cls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
+        sls_token4 = selected_sls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
 
         x_start = x_end
         x_end = x_start + 256
-        cls_token_head = selected_cls[:, :, x_start:x_end].unsqueeze(-1)
-        sls_token_head = selected_sls[:, :, x_start:x_end].unsqueeze(-1)
+        cls_token_head = selected_cls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
+        sls_token_head = selected_sls[:, :, x_start:x_end].transpose(1, 2).unsqueeze(-1)
 
         x = self.conv1(input)
 

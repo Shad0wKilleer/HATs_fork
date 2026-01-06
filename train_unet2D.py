@@ -305,7 +305,7 @@ def main():
         )
 
         # Initialize AMP Scaler
-        scaler = GradScaler(enabled=args.FP16)
+        scaler = torch.amp.GradScaler("cuda", enabled=args.FP16)
         if args.FP16:
             print("Note: Using Native Torch AMP (FP16) during training************")
 
@@ -466,7 +466,7 @@ def main():
                         now_task = t_idx
                         weight = args.edge_weight**wts
 
-                        with autocast(enabled=args.FP16):
+                        with torch.amp.autocast("cuda", enabled=args.FP16):
                             term_seg_Dice, term_seg_BCE, Sup_term_all = (
                                 supervise_learning(
                                     images,
