@@ -79,7 +79,13 @@ def get_arguments():
     )
     parser.add_argument("--reload_from_checkpoint", type=str2bool, default=False)
     parser.add_argument("--input_size", type=str, default="512,512")
-    parser.add_argument("--batch_size", type=int, default=4)
+
+    # --- BATCH SIZE SETTINGS ---
+    # Actual memory usage per forward/backward pass
+    parser.add_argument("--batch_size", type=int, default=1)
+    # The effective batch size you want to simulate (e.g., 4 or 8)
+    parser.add_argument("--virtual_batch_size", type=int, default=4)
+
     parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--FP16", type=str2bool, default=True)
@@ -312,7 +318,6 @@ def main():
         )
 
         # Initialize AMP Scaler
-        # FIXED: Updated to torch.amp.GradScaler
         scaler = torch.amp.GradScaler("cuda", enabled=args.FP16)
         if args.FP16:
             print("Note: Using Native Torch AMP (FP16) during training************")
@@ -412,6 +417,23 @@ def main():
             columns=["epoch", "epoch_loss_supervise_mean", "semi_all"]
         )
 
+        # CHANGED: Variable Logic for Dynamic Batch Accumulation
+        virtual_batch_size = args.virtual_batch_size
+        physical_batch_size = args.batch_size
+
+        if virtual_batch_size % physical_batch_size != 0:
+            raise ValueError(
+                f"virtual_batch_size ({virtual_batch_size}) must be divisible by batch_size ({physical_batch_size})"
+            )
+
+        accumulation_steps = virtual_batch_size // physical_batch_size
+
+        print(f"Physical Batch Size: {physical_batch_size}")
+        print(f"Virtual Batch Size: {virtual_batch_size}")
+        print(f"Accumulation Steps: {accumulation_steps}")
+
+        global_step_cnt = 0
+
         for epoch in range(args.start_epoch, args.num_epochs):
             model.train()
 
@@ -434,6 +456,7 @@ def main():
             adjust_learning_rate(
                 optimizer, epoch, args.learning_rate, args.num_epochs, args.power
             )
+            optimizer.zero_grad()  # Initialize gradients before loop
 
             task_num = 4
             each_loss = torch.zeros((task_num)).cuda()
@@ -441,13 +464,14 @@ def main():
             supervised_loss = torch.zeros((task_num)).cuda()
 
             for iter, batch in enumerate(trainloader):
-                imgs = batch[0].cuda()
-                lbls = batch[1].cuda()
-                wt = batch[2].cuda().float()
+                # CHANGED: Keep data on CPU initially to save VRAM
+                imgs = batch[0]
+                lbls = batch[1]
+                wt = batch[2].float()
                 # batch[3] is name, skipped
-                l_ids = batch[4].cuda()
-                t_ids = batch[5].cuda()
-                s_ids = batch[6].cuda()
+                l_ids = batch[4]
+                t_ids = batch[5]
+                s_ids = batch[6]
 
                 for ki in range(len(imgs)):
                     now_task = layer_num[l_ids[ki]] + t_ids[ki]
@@ -464,9 +488,10 @@ def main():
                 for t_idx in range(4):
                     pool = task_pools[t_idx]
                     if pool["image"].num_imgs >= args.batch_size:
-                        images = pool["image"].query(args.batch_size)
-                        labels = pool["mask"].query(args.batch_size)
-                        wts = pool["weight"].query(args.batch_size)
+                        # CHANGED: Move to CUDA only when querying from pool
+                        images = pool["image"].query(args.batch_size).cuda()
+                        labels = pool["mask"].query(args.batch_size).cuda()
+                        wts = pool["weight"].query(args.batch_size).cuda()
                         scales = torch.ones(args.batch_size).cuda()
                         for bi in range(len(scales)):
                             scales[bi] = pool["scale"].pop(0)
@@ -474,7 +499,6 @@ def main():
                         now_task = t_idx
                         weight = args.edge_weight**wts
 
-                        # FIXED: Updated to torch.amp.autocast
                         with torch.amp.autocast("cuda", enabled=args.FP16):
                             term_seg_Dice, term_seg_BCE, Sup_term_all = (
                                 supervise_learning(
@@ -512,24 +536,31 @@ def main():
                         reduce_BCE = engine.all_reduce_tensor(term_seg_BCE)
                         reduce_all = engine.all_reduce_tensor(All_term_all)
 
-                        optimizer.zero_grad()
-                        # Use Scaler for backward
-                        scaler.scale(reduce_all).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
+                        # CHANGED: Gradient Accumulation Logic
+                        # Normalize loss by accumulation steps
+                        loss_normalized = reduce_all / accumulation_steps
+                        scaler.scale(loss_normalized).backward()
 
-                        if iter % 50 == 0:
-                            print(
-                                "Epoch {}: {}/{}, lr = {:.4}, Dice = {:.4}, BCE = {:.4}, loss_Sum = {:.4}".format(
-                                    epoch,
-                                    iter,
-                                    len(trainloader),
-                                    optimizer.param_groups[0]["lr"],
-                                    reduce_Dice.item(),
-                                    reduce_BCE.item(),
-                                    reduce_all.item(),
+                        global_step_cnt += 1
+
+                        # Only Step after accumulating enough gradients
+                        if global_step_cnt % accumulation_steps == 0:
+                            scaler.step(optimizer)
+                            scaler.update()
+                            optimizer.zero_grad()
+
+                            if iter % 50 == 0:
+                                print(
+                                    "Epoch {}: {}/{}, lr = {:.4}, Dice = {:.4}, BCE = {:.4}, loss_Sum = {:.4}".format(
+                                        epoch,
+                                        iter,
+                                        len(trainloader),
+                                        optimizer.param_groups[0]["lr"],
+                                        reduce_Dice.item(),
+                                        reduce_BCE.item(),
+                                        reduce_all.item(),
+                                    )
                                 )
-                            )
 
                         supervise_all = engine.all_reduce_tensor(Sup_term_all)
                         supervised_loss[now_task] += supervise_all
@@ -542,9 +573,10 @@ def main():
                 pool = task_pools[t_idx]
                 if pool["image"].num_imgs > 0:
                     current_batch_size = pool["image"].num_imgs
-                    images = pool["image"].query(current_batch_size)
-                    labels = pool["mask"].query(current_batch_size)
-                    wts = pool["weight"].query(current_batch_size)
+                    # CHANGED: Move to CUDA on query
+                    images = pool["image"].query(current_batch_size).cuda()
+                    labels = pool["mask"].query(current_batch_size).cuda()
+                    wts = pool["weight"].query(current_batch_size).cuda()
                     scales = torch.ones(current_batch_size).cuda()
                     for bi in range(len(scales)):
                         scales[bi] = pool["scale"].pop(0)
@@ -552,7 +584,6 @@ def main():
                     now_task = t_idx
                     weight = args.edge_weight**wts
 
-                    # FIXED: Updated to torch.amp.autocast
                     with torch.amp.autocast("cuda", enabled=args.FP16):
                         term_seg_Dice, term_seg_BCE, Sup_term_all = supervise_learning(
                             images,
@@ -584,10 +615,13 @@ def main():
                         )
 
                     reduce_all = engine.all_reduce_tensor(All_term_all)
-                    optimizer.zero_grad()
+
+                    # For cleanup, we can just step immediately to clear buffers
+                    # (Treating remainder as a full step effectively)
                     scaler.scale(reduce_all).backward()
                     scaler.step(optimizer)
                     scaler.update()
+                    optimizer.zero_grad()
 
                     supervise_all = engine.all_reduce_tensor(Sup_term_all)
                     supervised_loss[now_task] += supervise_all
