@@ -320,7 +320,7 @@ def main():
         # Initialize AMP Scaler
         scaler = torch.amp.GradScaler("cuda", enabled=args.FP16)
         if args.FP16:
-            print("Note: Using Native Torch AMP (FP16) during training************")
+            print("Note: Using Native Torch AMP (FP16) during training")
 
         if args.num_gpus > 1:
             model = engine.data_parallel(model)
@@ -375,16 +375,6 @@ def main():
             sampler=train_sampler,
         )
 
-        val_dataset = MOTSValDataSet(
-            args.valset_dir,
-            args.val_list,
-            max_iters=args.itrs_each_epoch * args.batch_size,
-            crop_size=input_size,
-            scale=args.random_scale,
-            mirror=args.random_mirror,
-            edge_weight=args.edge_weight,
-        )
-
         valloader = DataLoader(
             val_dataset,
             batch_size=args.batch_size,
@@ -417,7 +407,7 @@ def main():
             columns=["epoch", "epoch_loss_supervise_mean", "semi_all"]
         )
 
-        # CHANGED: Variable Logic for Dynamic Batch Accumulation
+        # I made batch size logic dynamic here
         virtual_batch_size = args.virtual_batch_size
         physical_batch_size = args.batch_size
 
@@ -464,7 +454,7 @@ def main():
             supervised_loss = torch.zeros((task_num)).cuda()
 
             for iter, batch in enumerate(trainloader):
-                # CHANGED: Keep data on CPU initially to save VRAM
+                # I kept data on CPU initially to save VRAM
                 imgs = batch[0]
                 lbls = batch[1]
                 wt = batch[2].float()
@@ -488,7 +478,7 @@ def main():
                 for t_idx in range(4):
                     pool = task_pools[t_idx]
                     if pool["image"].num_imgs >= args.batch_size:
-                        # CHANGED: Move to CUDA only when querying from pool
+                        # I moved to CUDA only when querying from pool
                         images = pool["image"].query(args.batch_size).cuda()
                         labels = pool["mask"].query(args.batch_size).cuda()
                         wts = pool["weight"].query(args.batch_size).cuda()
@@ -536,8 +526,7 @@ def main():
                         reduce_BCE = engine.all_reduce_tensor(term_seg_BCE)
                         reduce_all = engine.all_reduce_tensor(All_term_all)
 
-                        # CHANGED: Gradient Accumulation Logic
-                        # Normalize loss by accumulation steps
+                        # I normalized loss by accumulation steps
                         loss_normalized = reduce_all / accumulation_steps
                         scaler.scale(loss_normalized).backward()
 
@@ -549,18 +538,19 @@ def main():
                             scaler.update()
                             optimizer.zero_grad()
 
-                            if iter % 50 == 0:
-                                print(
-                                    "Epoch {}: {}/{}, lr = {:.4}, Dice = {:.4}, BCE = {:.4}, loss_Sum = {:.4}".format(
-                                        epoch,
-                                        iter,
-                                        len(trainloader),
-                                        optimizer.param_groups[0]["lr"],
-                                        reduce_Dice.item(),
-                                        reduce_BCE.item(),
-                                        reduce_all.item(),
-                                    )
+                        # I moved this back outside so it prints regardless of step
+                        if iter % 50 == 0:
+                            print(
+                                "Epoch {}: {}/{}, lr = {:.4}, Dice = {:.4}, BCE = {:.4}, loss_Sum = {:.4}".format(
+                                    epoch,
+                                    iter,
+                                    len(trainloader),
+                                    optimizer.param_groups[0]["lr"],
+                                    reduce_Dice.item(),
+                                    reduce_BCE.item(),
+                                    reduce_all.item(),
                                 )
+                            )
 
                         supervise_all = engine.all_reduce_tensor(Sup_term_all)
                         supervised_loss[now_task] += supervise_all
@@ -573,7 +563,7 @@ def main():
                 pool = task_pools[t_idx]
                 if pool["image"].num_imgs > 0:
                     current_batch_size = pool["image"].num_imgs
-                    # CHANGED: Move to CUDA on query
+                    # I moved to CUDA on query
                     images = pool["image"].query(current_batch_size).cuda()
                     labels = pool["mask"].query(current_batch_size).cuda()
                     wts = pool["weight"].query(current_batch_size).cuda()
@@ -616,8 +606,7 @@ def main():
 
                     reduce_all = engine.all_reduce_tensor(All_term_all)
 
-                    # For cleanup, we can just step immediately to clear buffers
-                    # (Treating remainder as a full step effectively)
+                    # For cleanup, I step immediately to clear buffers
                     scaler.scale(reduce_all).backward()
                     scaler.step(optimizer)
                     scaler.update()
