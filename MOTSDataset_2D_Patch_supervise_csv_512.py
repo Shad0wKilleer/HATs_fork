@@ -7,6 +7,20 @@ from torch.utils import data
 from torchvision.transforms import v2
 from torchvision import tv_tensors
 
+import random
+from torchvision.transforms.v2 import functional as F
+
+
+class RandomGamma(torch.nn.Module):
+    def __init__(self, log_gamma=(0.5, 2.0)):
+        super().__init__()
+        self.log_gamma = log_gamma
+
+    def forward(self, img):
+        # Sample a random gamma value from the range
+        gamma = random.uniform(self.log_gamma[0], self.log_gamma[1])
+        return F.adjust_gamma(img, gamma)
+
 
 class MOTSDataSet(data.Dataset):
     def __init__(
@@ -79,7 +93,7 @@ class MOTSDataSet(data.Dataset):
             [
                 # This adjusts the Contrast. 0.5: Makes the image look "washed out" or
                 # brighter in the shadows. Makes the shadows deeper and highlights sharper.
-                v2.RandomApply([v2.RandomGamma(log_gamma=(0.5, 2.0))], p=0.5),
+                v2.RandomApply([RandomGamma(log_gamma=(0.5, 2.0))], p=0.5),
                 # This shifts the Overall Brightness by up to 10%. # Matches Add(-0.1, 0.1)
                 v2.RandomApply([v2.ColorJitter(brightness=0.1)], p=0.5),
                 # This Blurs the image.

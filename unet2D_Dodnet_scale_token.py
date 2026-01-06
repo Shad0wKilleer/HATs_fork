@@ -14,6 +14,7 @@ class NoBottleneck(nn.Module):
         dilation=1,
         downsample=None,
         weight_std=False,
+        multi_grid=1,
     ):
         super().__init__()
         self.weight_std = weight_std
