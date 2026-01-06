@@ -230,8 +230,16 @@ class MOTSValDataSet(data.Dataset):
         task_id = datafiles["task_id"]
         scale_id = datafiles["scale_id"]
 
-        image = image[:, :, :3]
-        label = label[:, :, :3]
+        # Ensure 3 channels (Fix for 2D/Grayscale images)
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+        else:
+            image = image[:, :, :3]
+
+        if label.ndim == 2:
+            label = np.stack([label] * 3, axis=-1)
+        else:
+            label = label[:, :, :3]
 
         # Convert to Torch Tensors
         img_t = torch.from_numpy(image).permute(2, 0, 1).float()
