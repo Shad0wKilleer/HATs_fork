@@ -33,21 +33,41 @@ class MOTSDataSet(data.Dataset):
         self.geo_transforms = v2.Compose(
             [
                 v2.RandomAffine(
+                    # I allowed the image to be rotated by any angle up to 180°
                     degrees=180,
-                    translate=(0.2, 0.2),
-                    shear=(-16, 16, -16, 16),
-                    scale=(0.75, 1.5),
+                    # I allowed the image to "slide" up, down, left, or right by 20% of its size
+                    translate=(
+                        0.2,
+                        0.2,
+                    ),
+                    # I allowed the image to be "tilted" or distorted along the X and Y axes.
+                    # This helps the model handle organs that might be squashed or stretched.
+                    shear=(
+                        -16,
+                        16,
+                        -16,
+                        16,
+                    ),
+                    # This is the Isotropic Scale. I allowed the image to be
+                    # zoomed out (0.75x) or zoomed in (1.5x).
+                    scale=(
+                        0.75,
+                        1.5,
+                    ),
                     interpolation=v2.InterpolationMode.BILINEAR,
                 ),
+                # 50% chance the images will be flipped like mirror.
                 v2.RandomHorizontalFlip(p=0.5),
-                v2.Pad(
-                    padding=512, padding_mode="reflect"
-                ),  # Pad before crop to ensure size is sufficient
+                # Pad before crop to ensure size is sufficient. Instead of adding black bars
+                # (zeroes to pad with), I "mirrored" the edges of the image into the border.
+                v2.Pad(padding=512, padding_mode="reflect"),
+                # This is the final step. Regardless of how the image was stretched or moved,
+                # I cut out a perfect 512×512 square.
                 v2.RandomCrop(size=(512, 512)),
             ]
         )
 
-        # --- Color/Noise Augmentations (Image Only) ---
+        # --- Color/Noise Augmentations (Image Only, not applied on masks) ---
         # Logic matches:
         # iaa.GammaContrast -> v2.RandomGamma
         # iaa.Add -> v2.ColorJitter(brightness)
@@ -57,18 +77,23 @@ class MOTSDataSet(data.Dataset):
         # iaa.MultiplyHueAndSaturation -> v2.ColorJitter(hue, saturation)
         self.color_transforms = v2.Compose(
             [
+                # This adjusts the Contrast. 0.5: Makes the image look "washed out" or
+                # brighter in the shadows. Makes the shadows deeper and highlights sharper.
                 v2.RandomApply([v2.RandomGamma(log_gamma=(0.5, 2.0))], p=0.5),
-                v2.RandomApply(
-                    [v2.ColorJitter(brightness=0.1)], p=0.5
-                ),  # Matches Add(-0.1, 0.1)
+                # This shifts the Overall Brightness by up to 10%. # Matches Add(-0.1, 0.1)
+                v2.RandomApply([v2.ColorJitter(brightness=0.1)], p=0.5),
+                # This Blurs the image.
                 v2.RandomApply(
                     [v2.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 1.0))], p=0.5
                 ),
+                # This adds "Static" or Grain to the pixels.
                 v2.RandomApply([v2.GaussianNoise(mean=0.0, sigma=0.1)], p=0.5),
+                # It randomly paints small Black Rectangles (value=0) on the image.
                 v2.RandomApply(
                     [v2.RandomErasing(scale=(0.0, 0.05), ratio=(0.3, 3.3), value=0)],
                     p=0.5,
                 ),
+                # This subtly shifts the Colors.
                 v2.RandomApply([v2.ColorJitter(hue=0.05, saturation=0.05)], p=0.5),
             ]
         )
@@ -108,6 +133,8 @@ class MOTSDataSet(data.Dataset):
         lbl_t = torch.from_numpy(label).permute(2, 0, 1).float()
 
         # Wrap mask in TVTensor so V2 knows to treat it as a mask (Nearest Neighbor interpolation)
+        # When the mask is rotated or sheared, the engine knows to use Nearest Neighbor
+        # interpolation so the labels stay sharp (0 or 1) and don't become blurry decimals like 0.45.
         lbl_t = tv_tensors.Mask(lbl_t)
         img_t = tv_tensors.Image(img_t)
 

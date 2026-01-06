@@ -13,11 +13,9 @@ class NoBottleneck(nn.Module):
         stride=1,
         dilation=1,
         downsample=None,
-        fist_dilation=1,
-        multi_grid=1,
         weight_std=False,
     ):
-        super(NoBottleneck, self).__init__()
+        super().__init__()
         self.weight_std = weight_std
         self.gn1 = nn.GroupNorm(16, inplanes)
         self.conv1 = nn.Conv2d(
@@ -66,16 +64,12 @@ class NoBottleneck(nn.Module):
 
 class unet2D(nn.Module):
     def __init__(self, layers, num_classes=15, num_scale=4, weight_std=False):
-        self.inplanes = 128
         self.weight_std = weight_std
-        super(unet2D, self).__init__()
+        super().__init__()
 
         self.conv1 = nn.Conv2d(
             3, 32, kernel_size=(3, 3), stride=1, padding=(1, 1), dilation=1, bias=False
         )
-
-        self.add_0 = self._make_layer(NoBottleneck, 32, 32, layers[0], stride=(2, 2))
-        self.add_1 = self._make_layer(NoBottleneck, 32, 32, layers[0], stride=(4, 4))
 
         self.layer0 = self._make_layer(NoBottleneck, 32, 32, layers[0], stride=(1, 1))
         self.layer1 = self._make_layer(NoBottleneck, 32, 64, layers[1], stride=(2, 2))
@@ -98,15 +92,11 @@ class unet2D(nn.Module):
         )
 
         self.upsamplex2 = nn.Upsample(scale_factor=(2, 2))
-        self.upsamplex4 = nn.Upsample(scale_factor=(4, 4))
 
         self.x8_resb = self._make_layer(NoBottleneck, 256, 128, 1, stride=(1, 1))
         self.x4_resb = self._make_layer(NoBottleneck, 128, 64, 1, stride=(1, 1))
         self.x2_resb = self._make_layer(NoBottleneck, 64, 32, 1, stride=(1, 1))
         self.x1_resb = self._make_layer(NoBottleneck, 32, 32, 1, stride=(1, 1))
-
-        self.x1_resb_add0 = self._make_layer(NoBottleneck, 32, 32, 1, stride=(1, 1))
-        self.x1_resb_add1 = self._make_layer(NoBottleneck, 32, 32, 1, stride=(1, 1))
 
         self.precls_conv = nn.Sequential(
             nn.GroupNorm(16, 32),
@@ -151,11 +141,6 @@ class unet2D(nn.Module):
             )
 
         layers = []
-        generate_multi_grid = (
-            lambda index, grids: grids[index % len(grids)]
-            if isinstance(grids, tuple)
-            else 1
-        )
         layers.append(
             block(
                 inplanes,
@@ -163,7 +148,7 @@ class unet2D(nn.Module):
                 stride,
                 dilation=dilation,
                 downsample=downsample,
-                multi_grid=generate_multi_grid(0, multi_grid),
+                multi_grid=1,
                 weight_std=self.weight_std,
             )
         )
@@ -174,7 +159,7 @@ class unet2D(nn.Module):
                     planes,
                     planes,
                     dilation=dilation,
-                    multi_grid=generate_multi_grid(i, multi_grid),
+                    multi_grid=1,
                     weight_std=self.weight_std,
                 )
             )
@@ -219,7 +204,6 @@ class unet2D(nn.Module):
         return x
 
     def forward(self, input, task_id, scale_id):
-        # FIX: Use indexing to select correct task/scale per item in batch
         batch_size = input.shape[0]
         batch_indices = torch.arange(batch_size, device=input.device)
 
@@ -330,7 +314,7 @@ class unet2D(nn.Module):
         return logits
 
 
-def UNet2D(num_classes=15, num_scale=4, weight_std=False):
+def UNet2D(num_classes=4, num_scale=4, weight_std=False):
     print("Using DynConv 8,8,2")
     model = unet2D([1, 2, 2, 2, 2], num_classes, num_scale, weight_std)
     return model

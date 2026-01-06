@@ -21,6 +21,8 @@ from util_a.image_pool import ImagePool
 from unet2D_Dodnet_scale_token import UNet2D as UNet2D_scale
 
 
+# One hot encoding to convert the targets into
+# one hot encoded format
 def one_hot_3D(targets, C=2):
     targets_extend = targets.clone()
     targets_extend.unsqueeze_(1)  # convert to Nx1xHxW
@@ -31,6 +33,8 @@ def one_hot_3D(targets, C=2):
     return one_hot
 
 
+# A simple str-to-bool convertor to convert the
+# user given string into bool values
 def str2bool(v):
     if v.lower() in ("yes", "true", "t", "y", "1"):
         return True
@@ -40,6 +44,7 @@ def str2bool(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+# Getting arguments using the arg-parser
 def get_arguments():
     parser = argparse.ArgumentParser(description="UNet2D_HATs")
     parser.add_argument(
@@ -85,10 +90,15 @@ def get_arguments():
     return parser
 
 
+# In order to get better convergence we use not a constant learning rate
+# but a variable one. The learning rate start from 10^-4 but then gradually
+# decrease very close to zero. This helps the model to converge better at
+# the end of the training (during last few epoch)
 def lr_poly(base_lr, iter, max_iter, power):
     return base_lr * ((1 - float(iter) / max_iter) ** (power))
 
 
+# This is the caller to lr_poly that actually sets the lr during each epoch
 def adjust_learning_rate(optimizer, i_iter, lr, num_stemps, power):
     lr = lr_poly(lr, i_iter, num_stemps, power)
     optimizer.param_groups[0]["lr"] = lr
@@ -281,7 +291,7 @@ def main():
             torch.cuda.manual_seed(seed)
 
         # Create model
-        model = UNet2D_scale(num_classes=15, num_scale=4, weight_std=False)
+        model = UNet2D_scale(num_classes=4, num_scale=4, weight_std=False)
 
         device = torch.device("cuda:{}".format(args.local_rank))
         model.to(device)
@@ -371,65 +381,20 @@ def main():
 
         layer_num = [0, 5, 12]
         semi_ratio = 0.1
-        HATs_matrix = np.zeros((15, 15))
+        HATs_matrix = np.zeros((4, 4))
 
-        Area = np.zeros((15))
-        # ... [Keep Area initialization] ...
-        Area[0] = 2.434
-        Area[1] = 2.600
-        Area[2] = 1.760
-        Area[3] = 1.853
-        Area[4] = 1.844
-        Area[5] = 0.097
-        Area[6] = 0.360
-        Area[7] = 0.619
-        Area[8] = 0.466
-        Area[9] = 0.083
-        Area[10] = 0.002
-        Area[11] = 0.012
-        Area[12] = 0.001
-        Area[13] = 0.001
-        Area[14] = 0.002
+        Area = np.zeros((4))
+        Area[0] = 0.097  # DT
+        Area[1] = 0.360  # PT
+        Area[2] = 0.619  # Capsule
+        Area[3] = 0.466  # Tufts
 
-        Area_ratio = np.zeros((15, 15))
-        for xi in range(0, 15):
-            for yi in range(0, 15):
+        Area_ratio = np.zeros((4, 4))
+        for xi in range(0, 4):
+            for yi in range(0, 4):
                 Area_ratio[xi, yi] = division_ratio(Area[xi], Area[yi])
 
-        # Matrix initialization
-        # ... [Keep Matrix Initialization logic same as original] ...
-        HATs_matrix[0, [1, 2, 3, 4, 7, 8, 10, 12, 13]] = 2
-        HATs_matrix[0, 11] = 1
-        HATs_matrix[1, 0] = 2
-        HATs_matrix[1, [2, 3, 4, 7, 8, 10, 12, 13]] = 1
-        HATs_matrix[1, 11] = 2
-        for i in [2, 3, 4]:
-            HATs_matrix[i, 0] = 2
-            HATs_matrix[i, 1] = -1
-            HATs_matrix[i, [j for j in [2, 3, 4] if j != i]] = 2
-        HATs_matrix[5, [6, 7, 8, 9, 10, 11, 12, 13, 14]] = 2
-        HATs_matrix[6, [5, 7, 8, 9, 10, 11, 12, 13, 14]] = 2
-        HATs_matrix[7, [0, 5, 6, 9, 10, 11, 14]] = 2
-        HATs_matrix[7, 1] = -1
-        HATs_matrix[7, [8, 12, 13]] = 1
-        HATs_matrix[8, [0, 5, 6, 9, 10, 11, 14]] = 2
-        HATs_matrix[8, 1] = -1
-        HATs_matrix[8, 7] = -1
-        HATs_matrix[8, [12, 13]] = 1
-        HATs_matrix[9, [5, 6, 7, 8, 10, 11, 12, 13]] = 2
-        HATs_matrix[9, 14] = 1
-        HATs_matrix[10, [0, 5, 6, 7, 8, 9, 11, 12, 13, 14]] = 2
-        HATs_matrix[10, 1] = -1
-        HATs_matrix[11, 0] = -1
-        HATs_matrix[11, [1, 5, 6, 7, 8, 9, 10, 12, 13, 14]] = 2
-        HATs_matrix[12, [0, 5, 6, 9, 10, 11, 13, 14]] = 2
-        HATs_matrix[12, 1] = -1
-        HATs_matrix[12, [7, 8]] = -1
-        HATs_matrix[13, [0, 5, 6, 9, 10, 11, 12, 14]] = 2
-        HATs_matrix[13, 1] = -1
-        HATs_matrix[13, [7, 8]] = -1
-        HATs_matrix[14, [5, 6, 7, 8, 10, 11, 12, 13]] = 2
-        HATs_matrix[14, 9] = -1
+        HATs_matrix = [[0, 2, 2, 2], [2, 0, 2, 2], [2, 2, 0, 1], [2, 2, -1, 0]]
 
         df_loss = pd.DataFrame(
             columns=["epoch", "epoch_loss_supervise_mean", "semi_all"]
@@ -438,7 +403,7 @@ def main():
         for epoch in range(args.start_epoch, args.num_epochs):
             model.train()
 
-            # Initialize ImagePools for all 15 tasks
+            # Initialize ImagePools for all 4 tasks
             task_pools = {
                 i: {
                     "image": ImagePool(8),
@@ -447,7 +412,7 @@ def main():
                     "scale": [],
                     "layer": [],
                 }
-                for i in range(15)
+                for i in range(4)
             }
 
             if engine.distributed:
@@ -458,7 +423,7 @@ def main():
                 optimizer, epoch, args.learning_rate, args.num_epochs, args.power
             )
 
-            task_num = 15
+            task_num = 4
             each_loss = torch.zeros((task_num)).cuda()
             count_batch = torch.zeros((task_num)).cuda()
             supervised_loss = torch.zeros((task_num)).cuda()
@@ -484,7 +449,7 @@ def main():
                         pool["scale"].append(s_ids[ki])
                         pool["layer"].append(l_ids[ki])
 
-                for t_idx in range(15):
+                for t_idx in range(4):
                     pool = task_pools[t_idx]
                     if pool["image"].num_imgs >= args.batch_size:
                         images = pool["image"].query(args.batch_size)
@@ -497,7 +462,6 @@ def main():
                         now_task = t_idx
                         weight = args.edge_weight**wts
 
-                        # --- UPDATED TRAINING STEP ---
                         with autocast(enabled=args.FP16):
                             term_seg_Dice, term_seg_BCE, Sup_term_all = (
                                 supervise_learning(
@@ -561,7 +525,7 @@ def main():
                         epoch_loss.append(float(reduce_all))
 
             # Last round clean up
-            for t_idx in range(15):
+            for t_idx in range(4):
                 pool = task_pools[t_idx]
                 if pool["image"].num_imgs > 0:
                     current_batch_size = pool["image"].num_imgs
@@ -657,10 +621,10 @@ def main():
                 model.eval()
                 val_pools = {
                     i: {"image": ImagePool(8), "mask": ImagePool(8), "scale": []}
-                    for i in range(15)
+                    for i in range(4)
                 }
 
-                val_metrics = np.zeros((5, 15))
+                val_metrics = np.zeros((5, 4))
 
                 with torch.no_grad():
                     for batch1 in valloader:
@@ -677,7 +641,7 @@ def main():
                                 val_pools[now_task]["mask"].add(lbls[ki].unsqueeze(0))
                                 val_pools[now_task]["scale"].append(s_ids[ki])
 
-                        for t_idx in range(15):
+                        for t_idx in range(4):
                             pool = val_pools[t_idx]
                             while pool["image"].num_imgs >= args.batch_size:
                                 images = pool["image"].query(args.batch_size)
@@ -739,8 +703,7 @@ def main():
                                 val_metrics[3, t_idx] += PPV
                                 val_metrics[4, t_idx] += 1
 
-                    # Clean up (remaining validation batches)
-                    for t_idx in range(15):
+                    for t_idx in range(4):
                         pool = val_pools[t_idx]
                         if pool["image"].num_imgs > 0:
                             current_batch_size = pool["image"].num_imgs
@@ -808,7 +771,7 @@ def main():
 
                     df_val = pd.DataFrame(
                         {
-                            "Task": range(15),
+                            "Task": range(4),
                             "F1": avg_F1,
                             "Dice": avg_Dice,
                             "TPR": avg_TPR,
