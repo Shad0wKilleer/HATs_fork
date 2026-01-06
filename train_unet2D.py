@@ -375,6 +375,16 @@ def main():
             sampler=train_sampler,
         )
 
+        val_dataset = MOTSValDataSet(
+            args.valset_dir,
+            args.val_list,
+            max_iters=args.itrs_each_epoch * args.batch_size,
+            crop_size=input_size,
+            scale=args.random_scale,
+            mirror=args.random_mirror,
+            edge_weight=args.edge_weight,
+        )
+
         valloader = DataLoader(
             val_dataset,
             batch_size=args.batch_size,
